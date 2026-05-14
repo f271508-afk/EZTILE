@@ -1,0 +1,761 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, collection, doc, addDoc, updateDoc, 
+  deleteDoc, onSnapshot, query, orderBy, serverTimestamp, setDoc
+} from 'firebase/firestore';
+import { getAuth, signInAnonymously } from 'firebase/auth';
+import { 
+  Plus, Package, LayoutGrid, History, 
+  Trash2, Edit3, Search, TrendingUp,
+  Warehouse, CloudOff, Cloud, Tags, Info, AlertTriangle, ArrowUpRight, ArrowDownLeft,
+  DollarSign, Ruler, Settings, ChevronRight, Users, Truck, Briefcase, ChevronDown, ChevronUp
+} from 'lucide-react';
+
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'tile-inventory-pro';
+
+const Card = ({ children, className = "" }) => (
+  <div className={`bg-white dark:bg-slate-900 rounded-2xl p-5 shadow-sm border border-slate-200 dark:border-slate-800 ${className}`}>
+    {children}
+  </div>
+);
+
+const Button = ({ children, onClick, variant = "primary", className = "", type = "button", disabled = false }) => {
+  const variants = {
+    primary: "bg-blue-600 text-white hover:bg-blue-700 shadow-md shadow-blue-200 dark:shadow-none disabled:bg-slate-300 disabled:shadow-none",
+    outline: "border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800",
+    danger: "bg-rose-50 text-rose-600 hover:bg-rose-600 hover:text-white",
+    success: "bg-emerald-600 text-white hover:bg-emerald-700"
+  };
+  return (
+    <button 
+      type={type} 
+      onClick={onClick} 
+      disabled={disabled}
+      className={`px-4 py-2 rounded-xl font-bold transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50 ${variants[variant]} ${className}`}
+    >
+      {children}
+    </button>
+  );
+};
+
+const TABS = { 
+  DASHBOARD: 'dashboard', 
+  INVENTORY: 'inventory', 
+  LOCATIONS: 'locations', 
+  CATEGORIES: 'categories', 
+  PARTNERS: 'partners',
+  HISTORY: 'history' 
+};
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState(TABS.DASHBOARD);
+  const [materials, setMaterials] = useState([]);
+  const [locations, setLocations] = useState([]);
+  const [categories, setCategories] = useState([]);
+  const [partners, setPartners] = useState([]);
+  const [transactions, setTransactions] = useState([]);
+  const [syncStatus, setSyncStatus] = useState('connecting');
+  const [searchTerm, setSearchTerm] = useState("");
+  
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingMaterial, setEditingMaterial] = useState(null);
+  const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
+  const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
+  const [isPartnerModalOpen, setIsPartnerModalOpen] = useState(false);
+  const [stockModal, setStockModal] = useState({ open: false, material: null, type: 'in' });
+
+  useEffect(() => {
+    const loadLocal = () => {
+      setMaterials(JSON.parse(localStorage.getItem('tile_materials') || '[]'));
+      setLocations(JSON.parse(localStorage.getItem('tile_locations') || '[]'));
+      setCategories(JSON.parse(localStorage.getItem('tile_categories') || '[]'));
+      setPartners(JSON.parse(localStorage.getItem('tile_partners') || '[]'));
+      setTransactions(JSON.parse(localStorage.getItem('tile_transactions') || '[]'));
+    };
+    loadLocal();
+
+    signInAnonymously(auth).then(() => {
+      const dataPath = ['artifacts', appId, 'public', 'data'];
+      const setupListener = (collectionName, setter) => {
+        return onSnapshot(collection(db, ...dataPath, collectionName), 
+          (s) => {
+            const data = s.docs.map(d => ({ id: d.id, ...d.data() }));
+            setter(data);
+            localStorage.setItem(`tile_${collectionName}`, JSON.stringify(data));
+            setSyncStatus('synced');
+          },
+          (err) => {
+            console.warn(`${collectionName} Sync Blocked:`, err.message);
+            if (err.code === 'permission-denied') setSyncStatus('permission-denied');
+          }
+        );
+      };
+
+      const unsubM = setupListener('materials', setMaterials);
+      const unsubL = setupListener('locations', setLocations);
+      const unsubC = setupListener('categories', setCategories);
+      const unsubP = setupListener('partners', setPartners);
+      const unsubT = setupListener('transactions', setTransactions);
+
+      return () => { unsubM(); unsubL(); unsubC(); unsubP(); unsubT(); };
+    }).catch(() => setSyncStatus('permission-denied'));
+  }, []);
+
+  const safeSave = async (collectionName, data, id = null) => {
+    const timestamp = new Date().toISOString();
+    const cleanData = { ...data, updatedAt: timestamp };
+    const storageKey = `tile_${collectionName}`;
+    let nextState;
+    
+    if (id) {
+      const current = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      nextState = current.map(item => item.id === id ? { ...item, ...cleanData } : item);
+    } else {
+      const current = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      const newId = Math.random().toString(36).substr(2, 9);
+      nextState = [...current, { ...cleanData, id: newId, createdAt: timestamp }];
+    }
+    localStorage.setItem(storageKey, JSON.stringify(nextState));
+    
+    if (collectionName === 'materials') setMaterials(nextState);
+    if (collectionName === 'locations') setLocations(nextState);
+    if (collectionName === 'categories') setCategories(nextState);
+    if (collectionName === 'partners') setPartners(nextState);
+    if (collectionName === 'transactions') setTransactions(nextState);
+
+    try {
+      const path = ['artifacts', appId, 'public', 'data', collectionName];
+      if (id) await setDoc(doc(db, ...path, id), cleanData, { merge: true });
+      else await addDoc(collection(db, ...path), { ...cleanData, createdAt: timestamp });
+    } catch (err) { console.warn(`Cloud save failed (${collectionName}). Using LocalStorage.`); }
+  };
+
+  const handleSaveMaterial = (formData) => {
+    const areaPerPiece = (parseFloat(formData.length) * parseFloat(formData.width)) / 10000;
+    const data = { 
+      ...formData, 
+      areaPerPiece, 
+      stock: parseFloat(formData.stock) || 0,
+      price: parseFloat(formData.price) || 0
+    };
+    safeSave('materials', data, editingMaterial?.id);
+    setIsModalOpen(false);
+  };
+
+  const handleStockAdjust = (amount, note, transactionLocation, sourceDestination) => {
+    const numAmount = parseFloat(amount);
+    const m = stockModal.material;
+    const newStock = stockModal.type === 'in' ? (m.stock || 0) + numAmount : (m.stock || 0) - numAmount;
+    
+    safeSave('materials', { stock: newStock, locationId: transactionLocation.id, locationName: transactionLocation.name }, m.id);
+    safeSave('transactions', {
+      materialId: m.id, materialName: m.name, type: stockModal.type, amount: numAmount,
+      priceAtTime: m.price || 0, unit: m.unit || '片', locationName: transactionLocation.name,
+      sourceDestination, timestamp: new Date().toISOString(),
+      afterStock: newStock // 紀錄交易後的庫存
+    });
+    setStockModal({ open: false, material: null, type: 'in' });
+  };
+
+  const filteredMaterials = useMemo(() => {
+    return materials.filter(m => 
+      (m.name || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (m.batchNumber || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (m.locationName || "").toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (m.category || "").toLowerCase().includes(searchTerm.toLowerCase())
+    );
+  }, [materials, searchTerm]);
+
+  const totalAssetValue = useMemo(() => materials.reduce((acc, m) => acc + ((m.stock || 0) * (m.price || 0)), 0), [materials]);
+
+  return (
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col md:flex-row font-sans">
+      
+      {}
+      <nav className="w-full md:w-72 bg-white dark:bg-slate-900 border-b md:border-r border-slate-200 dark:border-slate-800 p-5 flex flex-col gap-2 shrink-0">
+        <div className="flex items-center gap-3 px-2 mb-4">
+          <div className="bg-blue-600 p-2.5 rounded-xl text-white shadow-lg shadow-blue-200 dark:shadow-none">
+            <LayoutGrid size={24} />
+          </div>
+          <div>
+            <h1 className="font-black text-xl tracking-tight text-slate-800 dark:text-white">磁磚雲端物管</h1>
+            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Tile Asset Pro</p>
+          </div>
+        </div>
+        
+        <div className={`flex items-center gap-2 px-4 py-2.5 mb-6 rounded-xl text-xs font-bold transition-colors ${
+          syncStatus === 'synced' ? 'bg-emerald-50 text-emerald-700' : 
+          syncStatus === 'connecting' ? 'bg-blue-50 text-blue-700' : 'bg-rose-50 text-rose-700'
+        }`}>
+          {syncStatus === 'synced' ? <Cloud size={14}/> : syncStatus === 'connecting' ? <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"/> : <CloudOff size={14}/>}
+          {syncStatus === 'synced' ? '雲端即時同步中' : syncStatus === 'connecting' ? '建立連接...' : '本地儲存模式'}
+        </div>
+
+        {[
+          { id: TABS.DASHBOARD, label: '營運概覽', icon: TrendingUp },
+          { id: TABS.INVENTORY, label: '物料清單', icon: Package },
+          { id: TABS.CATEGORIES, label: '分類編修', icon: Tags },
+          { id: TABS.LOCATIONS, label: '倉庫管理', icon: Warehouse },
+          { id: TABS.PARTNERS, label: '往來單位', icon: Users },
+          { id: TABS.HISTORY, label: '入/出庫紀錄', icon: History }
+        ].map(item => (
+          <button key={item.id} onClick={() => setActiveTab(item.id)} className={`flex items-center gap-3 px-4 py-3.5 rounded-xl transition-all ${activeTab === item.id ? 'bg-blue-600 text-white font-bold shadow-md shadow-blue-100' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>
+            <item.icon size={20} /> {item.label}
+          </button>
+        ))}
+      </nav>
+
+      {}
+      <main className="flex-1 overflow-y-auto p-6 md:p-10">
+        {activeTab === TABS.DASHBOARD && (
+          <div className="space-y-8">
+            <header>
+              <h2 className="text-3xl font-black">營運資產概覽</h2>
+              <p className="text-slate-500">全庫總值與即時庫存動能</p>
+            </header>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+              <Card className="border-l-4 border-l-blue-600 bg-gradient-to-br from-white to-blue-50/30">
+                <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">全庫庫存總市值</p>
+                <h3 className="text-3xl font-black mt-2 text-blue-600">${totalAssetValue.toLocaleString()}</h3>
+              </Card>
+              <Card className="border-l-4 border-l-emerald-600">
+                <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">總可用施作面積</p>
+                <h3 className="text-3xl font-black mt-2 text-emerald-600">
+                  {materials.reduce((acc, m) => acc + ((m.stock || 0) * (m.areaPerPiece || 0)), 0).toFixed(1)} <span className="text-sm font-normal text-slate-400">m²</span>
+                </h3>
+              </Card>
+              <Card className="border-l-4 border-l-amber-600">
+                <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">物料品項</p>
+                <h3 className="text-3xl font-black mt-2">{materials.length}</h3>
+              </Card>
+              <Card className="border-l-4 border-l-rose-600">
+                <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">低庫存警戒</p>
+                <h3 className="text-3xl font-black mt-2 text-rose-600">{materials.filter(m => (m.stock || 0) < 10).length}</h3>
+              </Card>
+            </div>
+            
+            <Card>
+              <h4 className="font-bold mb-4 flex items-center gap-2"><History size={18} className="text-blue-500"/> 近期異動流向</h4>
+              <div className="space-y-4">
+                {transactions.slice(-5).reverse().map(t => (
+                  <div key={t.id} className="flex items-center justify-between py-2 border-b border-slate-50 dark:border-slate-800 last:border-0">
+                    <div className="flex gap-3 items-center">
+                      <div className={`p-2 rounded-lg ${t.type === 'in' ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}`}>
+                        {t.type === 'in' ? <ArrowDownLeft size={14}/> : <ArrowUpRight size={14}/>}
+                      </div>
+                      <div>
+                        <p className="text-sm font-bold">{t.materialName}</p>
+                        <p className="text-[10px] text-slate-400">{t.sourceDestination}</p>
+                      </div>
+                    </div>
+                    <p className={`font-black ${t.type === 'in' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      {t.type === 'in' ? '+' : '-'}{t.amount}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {}
+        {activeTab === TABS.INVENTORY && (
+          <div className="space-y-6">
+            <header className="flex flex-col lg:flex-row gap-4 justify-between items-start lg:items-center">
+              <div>
+                <h2 className="text-3xl font-black">物料清單</h2>
+                <p className="text-slate-500">磁磚規格、批號、單價與資產監控</p>
+              </div>
+              <div className="flex gap-3 w-full lg:w-auto">
+                <div className="relative flex-1 lg:w-80">
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <input placeholder="搜尋名稱、批號、地點..." className="pl-12 pr-4 py-3 rounded-2xl border dark:bg-slate-900 w-full outline-none focus:ring-2 focus:ring-blue-500 shadow-sm" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+                </div>
+                <Button onClick={() => { setEditingMaterial(null); setIsModalOpen(true); }}><Plus size={20} /> 新增物料</Button>
+              </div>
+            </header>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+              {filteredMaterials.map(m => (
+                <Card key={m.id} className="group flex flex-col h-full hover:shadow-xl transition-all">
+                  <div className="flex justify-between items-start mb-4">
+                    <span className="px-2.5 py-1 bg-blue-50 dark:bg-blue-900/30 rounded-lg text-[10px] font-black text-blue-600 uppercase tracking-wider">{m.category || '未分類'}</span>
+                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button onClick={() => { setEditingMaterial(m); setIsModalOpen(true); }} className="p-2 bg-slate-100 dark:bg-slate-800 text-slate-600 rounded-lg hover:bg-blue-600 hover:text-white"><Edit3 size={14} /></button>
+                      <button onClick={() => { if(window.confirm('確定刪除？')) deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'materials', m.id)); }} className="p-2 bg-rose-50 text-rose-600 rounded-lg hover:bg-rose-600 hover:text-white"><Trash2 size={14} /></button>
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <h4 className="font-black text-xl leading-tight mb-1 truncate">{m.name}</h4>
+                    <div className="flex items-center justify-between text-slate-400 text-xs mb-4">
+                      <span className="flex items-center gap-1 font-bold"><Warehouse size={12} className="text-blue-500" /> {m.locationName || '未指定'}</span>
+                      <span className="bg-amber-100/50 text-amber-700 px-1.5 py-0.5 rounded-md font-bold">批號: {m.batchNumber || '無'}</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 mb-4">
+                      <div className="bg-slate-50 dark:bg-slate-800/50 p-3 rounded-xl border border-slate-100">
+                        <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">在庫數量</p>
+                        <p className={`text-xl font-black ${m.stock < 10 ? 'text-rose-600' : 'text-slate-700 dark:text-slate-100'}`}>{m.stock} <span className="text-xs font-normal opacity-50">{m.unit}</span></p>
+                      </div>
+                      <div className="bg-emerald-50/30 dark:bg-emerald-900/10 p-3 rounded-xl border border-emerald-100/50">
+                        <p className="text-[10px] text-emerald-600 font-bold uppercase mb-1">可用面積</p>
+                        <p className="text-xl font-black text-emerald-600">{((m.stock || 0) * (m.areaPerPiece || 0)).toFixed(1)} <span className="text-xs font-normal opacity-50">m²</span></p>
+                      </div>
+                    </div>
+                    <div className="flex justify-between items-center px-1 text-sm font-bold bg-slate-50 dark:bg-slate-800/30 p-2 rounded-lg">
+                      <span className="text-slate-400">資產價值:</span>
+                      <span className="text-blue-600 font-black text-base">${((m.stock || 0) * (m.price || 0)).toLocaleString()}</span>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 mt-6">
+                    <Button variant="outline" onClick={() => setStockModal({ open: true, material: m, type: 'out' })} className="text-xs py-2.5">出庫</Button>
+                    <Button onClick={() => setStockModal({ open: true, material: m, type: 'in' })} className="text-xs py-2.5">入庫</Button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {}
+        {activeTab === TABS.LOCATIONS && (
+          <div className="space-y-6">
+            <header className="flex justify-between items-center">
+              <div>
+                <h2 className="text-3xl font-black">倉庫與資產明細</h2>
+                <p className="text-slate-500">即時監控各倉庫存放的物料種類、庫存與資產價值</p>
+              </div>
+              <Button onClick={() => setIsLocationModalOpen(true)}><Plus size={20} /> 新增倉庫</Button>
+            </header>
+            <div className="grid grid-cols-1 gap-6">
+              {locations.map(loc => {
+                const locMaterials = materials.filter(m => m.locationId === loc.id);
+                const totalValue = locMaterials.reduce((acc, m) => acc + ((m.stock || 0) * (m.price || 0)), 0);
+                return (
+                  <Card key={loc.id} className="border-t-4 border-t-blue-600">
+                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+                      <div className="flex items-center gap-4">
+                        <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-2xl text-blue-600">
+                          <Warehouse size={32}/>
+                        </div>
+                        <div>
+                          <h3 className="font-black text-2xl">{loc.name}</h3>
+                          <p className="text-xs text-slate-400 font-bold uppercase tracking-wider">
+                            包含 {locMaterials.length} 項物料
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-6">
+                        <div className="text-right">
+                          <p className="text-[10px] font-black text-slate-400 uppercase mb-1">該據點總資產</p>
+                          <p className="text-2xl font-black text-emerald-600">${totalValue.toLocaleString()}</p>
+                        </div>
+                        <button onClick={() => { if(window.confirm('確定刪除？')) deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'locations', loc.id)); }} className="p-2 text-slate-300 hover:text-rose-500 transition-colors"><Trash2 size={20}/></button>
+                      </div>
+                    </div>
+                    
+                    <div className="overflow-x-auto bg-slate-50 dark:bg-slate-950/50 rounded-2xl border border-slate-100 dark:border-slate-800">
+                      <table className="w-full text-left text-sm">
+                        <thead className="border-b dark:border-slate-800 text-[10px] font-black text-slate-400 uppercase tracking-widest bg-slate-100/50 dark:bg-slate-900/50">
+                          <tr>
+                            <th className="px-6 py-3">物料項目</th>
+                            <th className="px-6 py-3">規格/批號</th>
+                            <th className="px-6 py-3 text-right">當前庫存</th>
+                            <th className="px-6 py-3 text-right">單價</th>
+                            <th className="px-6 py-3 text-right">小計總值</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                          {locMaterials.length > 0 ? locMaterials.map(m => (
+                            <tr key={m.id} className="hover:bg-white dark:hover:bg-slate-800/50 transition-colors">
+                              <td className="px-6 py-4 font-bold">{m.name}</td>
+                              <td className="px-6 py-4 text-xs text-slate-500">
+                                <span className="bg-amber-100/50 text-amber-700 px-1.5 py-0.5 rounded mr-2">批: {m.batchNumber || '無'}</span>
+                                {m.length}x{m.width}cm
+                              </td>
+                              <td className="px-6 py-4 text-right font-black">
+                                {m.stock} <span className="text-[10px] font-normal text-slate-400">{m.unit}</span>
+                              </td>
+                              <td className="px-6 py-4 text-right text-slate-500">${m.price}</td>
+                              <td className="px-6 py-4 text-right font-black text-blue-600">
+                                ${((m.stock || 0) * (m.price || 0)).toLocaleString()}
+                              </td>
+                            </tr>
+                          )) : (
+                            <tr>
+                              <td colSpan="5" className="px-6 py-10 text-center text-slate-400 italic">目前無物料存放於此倉庫</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {}
+        {activeTab === TABS.PARTNERS && (
+          <div className="space-y-6">
+            <header className="flex justify-between items-center">
+              <div>
+                <h2 className="text-3xl font-black">往來單位與庫存統計</h2>
+                <p className="text-slate-500">追蹤工地案場目前持有的物料數量與累計採購總額</p>
+              </div>
+              <Button onClick={() => setIsPartnerModalOpen(true)}><Plus size={20} /> 新增單位</Button>
+            </header>
+            <div className="grid grid-cols-1 gap-6">
+              {partners.map(p => {
+                const partnerTransactions = transactions.filter(t => t.sourceDestination === p.name);
+                const totalValue = partnerTransactions.reduce((acc, t) => {
+                  const val = (t.amount || 0) * (t.priceAtTime || 0);
+                  return acc + val;
+                }, 0);
+                
+                const materialSummary = partnerTransactions.reduce((acc, t) => {
+                  if (!acc[t.materialId]) {
+                    acc[t.materialId] = { 
+                      name: t.materialName, 
+                      inQty: 0, 
+                      outQty: 0, 
+                      totalAmount: 0,
+                      unit: t.unit
+                    };
+                  }
+                  if (t.type === 'in') acc[t.materialId].inQty += t.amount;
+                  else acc[t.materialId].outQty += t.amount;
+                  acc[t.materialId].totalAmount += (t.amount * (t.priceAtTime || 0));
+                  return acc;
+                }, {});
+
+                return (
+                  <Card key={p.id} className="border-t-4 border-t-indigo-600">
+                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+                      <div className="flex items-center gap-4">
+                        <div className="p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-2xl text-indigo-600">
+                          <Users size={32}/>
+                        </div>
+                        <div>
+                          <h3 className="font-black text-2xl">{p.name}</h3>
+                          <p className="text-xs text-slate-400 font-bold uppercase tracking-wider">
+                            共異動 {partnerTransactions.length} 次
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-6">
+                        <div className="text-right">
+                          <p className="text-[10px] font-black text-slate-400 uppercase mb-1">累計往來金額</p>
+                          <p className="text-2xl font-black text-emerald-600">${totalValue.toLocaleString()}</p>
+                        </div>
+                        <button onClick={() => { if(window.confirm('確定刪除？')) deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'partners', p.id)); }} className="p-2 text-slate-300 hover:text-rose-500 transition-colors"><Trash2 size={20}/></button>
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto bg-slate-50 dark:bg-slate-950/50 rounded-2xl border border-slate-100 dark:border-slate-800">
+                      <table className="w-full text-left text-sm">
+                        <thead className="border-b dark:border-slate-800 text-[10px] font-black text-slate-400 uppercase tracking-widest bg-slate-100/50 dark:bg-slate-900/50">
+                          <tr>
+                            <th className="px-6 py-3">交易項目</th>
+                            <th className="px-6 py-3 text-right">累計入庫(+)</th>
+                            <th className="px-6 py-3 text-right">累計出庫(-)</th>
+                            <th className="px-6 py-3 text-right">當前庫存</th>
+                            <th className="px-6 py-3 text-right">金額累計</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                          {Object.keys(materialSummary).length > 0 ? Object.values(materialSummary).map((m, idx) => (
+                            <tr key={idx} className="hover:bg-white dark:hover:bg-slate-800/50 transition-colors">
+                              <td className="px-6 py-4 font-bold">{m.name}</td>
+                              <td className="px-6 py-4 text-right text-emerald-600 font-medium">+{m.inQty}</td>
+                              <td className="px-6 py-4 text-right text-rose-600 font-medium">-{m.outQty}</td>
+                              <td className="px-6 py-4 text-right font-black">
+                                {m.inQty - m.outQty} <span className="text-[10px] font-normal text-slate-400">{m.unit}</span>
+                              </td>
+                              <td className="px-6 py-4 text-right font-black text-blue-600">
+                                ${m.totalAmount.toLocaleString()}
+                              </td>
+                            </tr>
+                          )) : (
+                            <tr>
+                              <td colSpan="5" className="px-6 py-10 text-center text-slate-400 italic">尚無任何物料交易紀錄</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {}
+        {activeTab === TABS.CATEGORIES && (
+          <div className="space-y-6">
+            <header className="flex justify-between items-center">
+              <div>
+                <h2 className="text-3xl font-black">分類編修</h2>
+                <p className="text-slate-500">標準化磁磚品類管理</p>
+              </div>
+              <Button onClick={() => setIsCategoryModalOpen(true)}><Plus size={20} /> 新增分類</Button>
+            </header>
+            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
+              {categories.map(cat => (
+                <Card key={cat.id} className="flex flex-col items-center justify-center py-8 text-center group relative border-2 border-transparent hover:border-blue-100">
+                  <div className="p-3 bg-indigo-50 dark:bg-indigo-900/20 rounded-full text-indigo-600 mb-3"><Tags size={24} /></div>
+                  <h4 className="font-black">{cat.name}</h4>
+                  <p className="text-[10px] text-slate-400 mt-1">{materials.filter(m => m.category === cat.name).length} 個品項</p>
+                  <button onClick={() => { if(window.confirm('確定刪除？')) deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'categories', cat.id)); }} className="absolute top-2 right-2 p-1.5 opacity-0 group-hover:opacity-100 text-slate-300 hover:text-rose-600 transition-all"><Trash2 size={14} /></button>
+                </Card>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {}
+        {activeTab === TABS.HISTORY && (
+          <div className="space-y-6">
+            <h2 className="text-3xl font-black">入/出庫完整紀錄</h2>
+            <Card className="p-0 overflow-hidden border-slate-200">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-slate-50 dark:bg-slate-900 border-b dark:border-slate-800 text-slate-400 font-black uppercase tracking-widest text-[10px]">
+                    <tr>
+                      <th className="px-6 py-5">時間</th>
+                      <th className="px-6 py-5">品項</th>
+                      <th className="px-6 py-5 text-center">入/出庫</th>
+                      <th className="px-6 py-5">倉庫地點</th>
+                      <th className="px-6 py-5">往來單位 (來源/去處)</th>
+                      <th className="px-6 py-5 text-right">數量 (異動金額)</th>
+                      <th className="px-6 py-5 text-right bg-slate-100/50 dark:bg-slate-800/50">在庫數量</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {transactions.slice().reverse().map(t => (
+                      <tr key={t.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                        <td className="px-6 py-5 text-slate-400 text-[11px] font-mono">
+                          {new Date(t.timestamp).toLocaleDateString()}<br/><span className="opacity-60">{new Date(t.timestamp).toLocaleTimeString()}</span>
+                        </td>
+                        <td className="px-6 py-5 font-bold">{t.materialName}</td>
+                        <td className="px-6 py-5 text-center">
+                          <span className={`px-2.5 py-1 rounded-lg text-[10px] font-black border ${t.type === 'in' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-rose-50 text-rose-700 border-rose-100'}`}>
+                            {t.type === 'in' ? '入庫' : '出庫'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-5"><div className="flex items-center gap-1.5 text-slate-500 text-xs font-bold"><Warehouse size={12} className="text-blue-500" /> {t.locationName}</div></td>
+                        <td className="px-6 py-5 font-bold text-blue-600">{t.sourceDestination}</td>
+                        <td className={`px-6 py-5 font-black text-right ${t.type === 'in' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                          <div className="text-lg">{t.type === 'in' ? '+' : '-'}{t.amount} <span className="text-xs font-normal opacity-60">{t.unit}</span></div>
+                          <div className="text-[10px] opacity-60 font-bold">金額: ${(t.amount * (t.priceAtTime || 0)).toLocaleString()}</div>
+                        </td>
+                        <td className="px-6 py-5 text-right font-black bg-slate-50/50 dark:bg-slate-800/30">
+                          <div className="text-slate-700 dark:text-slate-200">{t.afterStock !== undefined ? t.afterStock : '-'} <span className="text-[10px] font-normal opacity-50">{t.unit}</span></div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          </div>
+        )}
+      </main>
+
+      {}
+      {isModalOpen && (
+        <MaterialFormModal 
+          material={editingMaterial} locations={locations} categories={categories} 
+          onClose={() => setIsModalOpen(false)} onSave={handleSaveMaterial} 
+        />
+      )}
+      {stockModal.open && (
+        <StockAdjustModal 
+          type={stockModal.type} material={stockModal.material} locations={locations} partners={partners}
+          onClose={() => setStockModal({ open: false, material: null, type: 'in' })} onConfirm={handleStockAdjust} 
+        />
+      )}
+      {isCategoryModalOpen && (
+        <FormModal title="新增分類" label="分類名稱" onSave={(d) => safeSave('categories', d)} onClose={() => setIsCategoryModalOpen(false)} />
+      )}
+      {isLocationModalOpen && (
+        <FormModal title="新增倉庫" label="倉庫名稱" onSave={(d) => safeSave('locations', d)} onClose={() => setIsLocationModalOpen(false)} />
+      )}
+      {isPartnerModalOpen && (
+        <FormModal title="新增往來單位" label="工地、廠商或案場名稱" onSave={(d) => safeSave('partners', d)} onClose={() => setIsPartnerModalOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+function MaterialFormModal({ material, locations, categories, onClose, onSave }) {
+  const [formData, setFormData] = useState(material || { 
+    name: '', category: '', locationId: '', locationName: '', 
+    batchNumber: '', length: 60, width: 60, stock: 0, unit: '片', price: 0 
+  });
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+      <div className="bg-white dark:bg-slate-900 rounded-3xl w-full max-w-xl p-8 shadow-2xl space-y-6 max-h-[90vh] overflow-y-auto">
+        <div className="flex justify-between items-center border-b pb-4">
+          <h3 className="font-black text-2xl text-blue-600">物料詳細資訊</h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 font-bold">✕</button>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="text-xs font-black text-slate-400 uppercase ml-1">基本識別</label>
+              <input required placeholder="物料名稱" className="w-full p-4 rounded-2xl border dark:bg-slate-800 outline-none focus:ring-2 focus:ring-blue-500 font-bold" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <select className="w-full p-4 rounded-2xl border dark:bg-slate-800 font-bold" value={formData.category} onChange={e => setFormData({...formData, category: e.target.value})}>
+                <option value="">-- 分類 --</option>
+                {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+              </select>
+              <input placeholder="批號" className="w-full p-4 rounded-2xl border dark:bg-slate-800 font-bold text-amber-600" value={formData.batchNumber} onChange={e => setFormData({...formData, batchNumber: e.target.value})} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-black text-slate-400 uppercase ml-1 flex items-center gap-1"><Ruler size={12}/> 規格 (cm)</label>
+              <div className="grid grid-cols-2 gap-4">
+                <input type="number" placeholder="長" className="w-full p-4 rounded-2xl border" value={formData.length} onChange={e => setFormData({...formData, length: e.target.value})} />
+                <input type="number" placeholder="寬" className="w-full p-4 rounded-2xl border" value={formData.width} onChange={e => setFormData({...formData, width: e.target.value})} />
+              </div>
+            </div>
+          </div>
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="text-xs font-black text-slate-400 uppercase ml-1">單位與單價</label>
+              <div className="grid grid-cols-2 gap-4">
+                <select className="w-full p-4 rounded-2xl border bg-slate-50 font-bold dark:bg-slate-800" value={formData.unit} onChange={e => setFormData({...formData, unit: e.target.value})}>
+                  <option value="片">片</option><option value="箱">箱</option><option value="坪">坪</option>
+                </select>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
+                  <input type="number" step="0.01" className="w-full pl-8 p-4 rounded-2xl border font-black text-blue-600 dark:bg-slate-800" value={formData.price} onChange={e => setFormData({...formData, price: e.target.value})} />
+                </div>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-black text-slate-400 uppercase ml-1">存放倉庫</label>
+              <select className="w-full p-4 rounded-2xl border dark:bg-slate-800" value={formData.locationId} onChange={e => {
+                const l = locations.find(loc => loc.id === e.target.value);
+                setFormData({...formData, locationId: e.target.value, locationName: l ? l.name : ''});
+              }}>
+                <option value="">-- 指定倉庫 --</option>
+                {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+              </select>
+            </div>
+          </div>
+        </div>
+        <div className="flex gap-3 pt-6 border-t">
+          <Button variant="outline" className="flex-1 py-4" onClick={onClose}>取消</Button>
+          <Button className="flex-1 py-4" onClick={() => { if(!formData.name) return; onSave(formData); }}>儲存資訊</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StockAdjustModal({ type, material, locations, partners, onClose, onConfirm }) {
+  const [amount, setAmount] = useState(1);
+  const [sourceDest, setSourceDest] = useState("");
+  const [selLocId, setSelLocId] = useState(material.locationId || "");
+  
+  // 校驗: 出庫數量不可大於在庫數量
+  const isInvalid = type === 'out' && parseFloat(amount) > material.stock;
+  const isSubmitDisabled = !sourceDest || !selLocId || isInvalid || amount <= 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+      <div className="bg-white dark:bg-slate-900 rounded-3xl w-full max-w-md p-8 shadow-2xl space-y-6">
+        <div className="flex items-center gap-3">
+          <div className={`p-3 rounded-2xl ${type === 'in' ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'}`}>
+            {type === 'in' ? <ArrowDownLeft size={24}/> : <ArrowUpRight size={24}/>}
+          </div>
+          <h3 className={`font-black text-2xl ${type === 'in' ? 'text-emerald-600' : 'text-rose-600'}`}>庫存{type === 'in' ? '入庫' : '出庫'}</h3>
+        </div>
+        
+        <div className="p-4 bg-slate-50 dark:bg-slate-800 rounded-2xl border border-slate-100 dark:border-slate-700">
+          <p className="font-black text-lg">{material.name}</p>
+          <div className="flex justify-between mt-2 text-xs">
+            <span className="text-slate-500 flex items-center gap-1 font-bold">
+              <Package size={14}/> 當前在庫：<span className={material.stock < 10 ? 'text-rose-600' : 'text-slate-900 dark:text-slate-100'}>{material.stock} {material.unit}</span>
+            </span>
+            <span className="font-bold text-blue-600">單價: ${material.price}</span>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <div className="space-y-1.5">
+            <label className="text-xs font-black text-slate-400 uppercase ml-1">{type === 'in' ? '來源 (供應商/廠商)' : '去處 (案場/工地)'}</label>
+            <select className="w-full p-4 rounded-2xl border font-bold text-blue-600 dark:bg-slate-800" value={sourceDest} onChange={e => setSourceDest(e.target.value)}>
+              <option value="">-- 請選擇往來單位 --</option>
+              {partners.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
+            </select>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="text-xs font-black text-slate-400 uppercase ml-1">選擇倉庫</label>
+              <select className="w-full p-4 rounded-2xl border font-bold dark:bg-slate-800" value={selLocId} onChange={e => setSelLocId(e.target.value)}>
+                <option value="">-- 倉庫 --</option>
+                {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-black text-slate-400 uppercase ml-1">數量</label>
+              <input 
+                type="number" 
+                className={`w-full p-4 rounded-2xl border text-xl font-black dark:bg-slate-800 outline-none ${isInvalid ? 'border-rose-500 ring-2 ring-rose-200' : 'focus:ring-2 focus:ring-blue-500'}`} 
+                value={amount} 
+                onChange={e => setAmount(e.target.value)} 
+              />
+            </div>
+          </div>
+          
+          {/* 錯誤提示 */}
+          {isInvalid && (
+            <div className="flex items-center gap-2 text-rose-600 bg-rose-50 p-3 rounded-xl border border-rose-100 animate-pulse">
+              <AlertTriangle size={16}/>
+              <p className="text-xs font-bold">出庫數量不可超過目前在庫量 ({material.stock} {material.unit})</p>
+            </div>
+          )}
+        </div>
+
+        <div className="flex gap-3 pt-4">
+          <Button variant="outline" className="flex-1 py-4" onClick={onClose}>取消</Button>
+          <Button 
+            className={`flex-1 py-4 ${type === 'in' ? 'bg-emerald-600' : 'bg-rose-600'}`} 
+            disabled={isSubmitDisabled}
+            onClick={() => {
+              const loc = locations.find(l => l.id === selLocId);
+              onConfirm(amount, "", loc, sourceDest);
+            }}
+          >確認提交</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FormModal({ title, label, onSave, onClose }) {
+  const [name, setName] = useState("");
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+      <div className="bg-white dark:bg-slate-900 rounded-3xl w-full max-w-sm p-8 shadow-2xl space-y-6">
+        <h3 className="font-black text-xl text-blue-600">{title}</h3>
+        <div className="space-y-1.5">
+          <label className="text-xs font-black text-slate-400 uppercase ml-1">名稱</label>
+          <input autoFocus placeholder={label} className="w-full p-4 rounded-2xl border font-bold dark:bg-slate-800" value={name} onChange={e => setName(e.target.value)} />
+        </div>
+        <div className="flex gap-3">
+          <Button variant="outline" className="flex-1 py-4" onClick={onClose}>取消</Button>
+          <Button className="flex-1 py-4" onClick={() => { if(!name) return; onSave({ name }); onClose(); }}>建立</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
